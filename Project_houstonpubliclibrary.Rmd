@@ -1,0 +1,231 @@
+---
+title: "Project_houstonlibray"
+author: "houhou"
+date: "1/16/2017"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning=F,message=F)
+# Define output size for the leaflet widget
+#knitr::opts_chunk$set(
+#  fig.width = 4.5,
+#  fig.height = 4.5
+#)
+```
+
+##Scrape raw data and prepare clean data
+```{r,include=F}
+setwd("~/project_sketchcity")
+```
+
+```{r,message=F,warning=F}
+library(rvest)
+link <- "http://houstonlibrary.org/find-it/find-library-location#locations_list" # grab the raw URL
+library <- link %>% read_html() %>% # scrape the link text
+        html_nodes(".locationTitle a") %>%
+        html_text() 
+       
+urls <- link %>% read_html () %>% # scrape the link URL
+        html_nodes("h4 a") %>%#html_text() yields the library name
+        html_attr("href")
+urls<-paste('http://houstonlibrary.org/',urls,sep='')
+
+address<-link %>% read_html() %>% # scrape the link text
+        html_nodes("#locations_list p ") %>%
+        html_text(trim=T) #trim white spaces
+
+index_tel<-grepl('Phone Number',address)#extract tel 
+tel<-address[index_tel]
+tel<-gsub('Phone Number','',tel)
+
+location<-address[!index_tel]#extract location
+location<-gsub('^Address|WiFi HotspotFully Accessible','',location)
+
+library(ggmap)
+geo<-geocode(location,output='latlona')#get the geo coordinates
+any(is.na(geo))#check NA's
+
+hours <- link %>% read_html() %>% # scrape the link text
+        html_nodes("div ul") %>%
+        html_text(trim=T) 
+index_i<-which(grepl('M Closed',hours))[1]
+index_f<-index_i+length(library)-1
+hours<-hours[index_i:index_f] 
+
+hours<-hours %>% gsub(pattern=' T ',replacement='| T\\1 ')%>% gsub(pattern=' W ',replacement='| W\\1 ')%>% gsub(pattern=' Th ',replacement='| Th\\1 ')%>% gsub(pattern=' F ',replacement='| F\\1 ')%>% gsub(pattern=' Sa ',replacement='| Sa\\1 ')%>% gsub(pattern=' Su ',replacement='| Su\\1 ')
+#hours<-gsub('\\n\\n ','',hours)
+#substring(hours,9)<-'|'
+#head(hours,2)
+
+#table(grepl('Su Closed',hours))
+
+#bus information
+fun_bus<- function(x){read_html(x) %>% # scrape the link text
+        html_nodes("p~ p+ p") %>%
+        html_text(trim=T)}
+bus<-lapply(urls,fun_bus)
+#busNo<-gsub('\\D',' ',bus)
+index_busNA<-which(!grepl('routes',bus))
+bus[index_busNA]<-'Nearby routes: NA'
+index_add<-which(!grepl('. For exact route',bus))
+bus[index_add]<-gsub('\\\"\\)','. For exact route',bus[index_add])
+bus<-bus%>% gsub(pattern='.*Nearby routes:|.*Nearby bus routes:',replacement='') %>% gsub(pattern='. For exact route.*',replacement='')
+#For exact route information, please visit ridemetro.org and use the \"Plan Your Trip\" feature. 
+
+raw_library<-data.frame(library=library,link=urls,location=location,tel=tel,hour=hours,bus=bus,lon=geo$lon,lat=geo$lat,stringsAsFactors=F)
+
+#raw_library[which(duplicated(raw_library$location)),]$library
+library(dplyr)
+raw_library<-distinct(raw_library,location,.keep_all=T)
+#View(raw_library)
+
+index_repair<-which(grepl('T Closed',raw_library$hour))
+#repair<-1:43
+#repair<-ifelse(repair%in%index_repair,'yes','no')
+raw_repair<-raw_library[index_repair,]
+raw_good<-raw_library[-index_repair,]
+#View(raw_good)
+
+saveRDS(raw_library,file='cleandata.rds')
+saveRDS(raw_repair,file='clean_repair.rds')
+saveRDS(raw_good,file='clean_good.rds')
+
+```
+
+##Add top ranking parks and gardens
+The data comes from tripadvisor for the parks and gardens.
+```{r,results='hide'}
+library(rvest)
+link_park<- "https://www.tripadvisor.com/Attractions-g56003-Activities-c57-t70,58-Houston_Texas.html" # grab the raw URL
+
+park <- link_park %>% read_html() %>% # scrape the link text
+        html_nodes(".popRanking , .property_title a") %>% #".popRanking"gives the rank and ".property_title a" gives the name
+        html_text(trim=T) 
+park_rank<-substring(grep('Nature & Parks in Houston',park,value=T),2,3)
+park_name<-grep('^[A-Z]',park,value=T)
+
+park_url <- link_park %>% read_html() %>% # scrape the link text
+        html_nodes(".property_title a") %>%#html_text(trim=T)
+        html_attr('href')
+park_url<-paste('https://www.tripadvisor.com/',park_url,sep='')
+
+library(ggmap)
+park_geo<-geocode(paste(park_name,'Houston, TX'),output = 'latlona')
+any(is.na(park_geo))
+library(stringr)
+park_location<-str_to_title(park_geo$address) %>% gsub(pattern=', Usa',replacement='')
+
+park_raw<-data.frame(park=park_name,rank=park_rank,link=park_url,lon=park_geo$lon,lat=park_geo$lat,location=park_location,stringsAsFactors=F)
+#View(park_raw)
+saveRDS(park_raw,file='cleanparkdata.rds')
+```
+
+##Add top ranking dessert store
+The data is from tripadvisor for top dessert in Houston
+```{r,results='hide'}
+library(rvest)
+link_dessert<- "https://www.tripadvisor.com/Restaurants-g56003-zfg9909-Houston_Texas.html" # grab the raw URL
+dessert<- link_dessert %>% read_html() %>% # scrape the link text
+        html_nodes(".popIndexDefault , .property_title") %>%
+        html_text(trim=T) 
+dessert_name<-grep('^[A-Z]',dessert,value=T)
+dessert_rank<-substring(grep('of 153 Dessert',dessert,value=T),2,3)
+
+dessert_url <- link_dessert %>% read_html() %>% # scrape the link text
+        html_nodes(".property_title") %>%#html_text(trim=T)
+        html_attr('href')
+dessert_url<-paste('https://www.tripadvisor.com',dessert_url,sep='')
+
+library(ggmap)
+dessert_geo<-geocode(paste(dessert_name,'Houston, TX'),output = 'latlona')
+any(is.na(dessert_geo))
+library(stringr)
+dessert_location<-str_to_title(dessert_geo$address) %>% gsub(pattern=', Usa',replacement='')
+
+dessert_raw<-data.frame(dessert=dessert_name,rank=dessert_rank,link=dessert_url,lon=dessert_geo$lon,lat=dessert_geo$lat,location=dessert_location,stringsAsFactors=F)
+#View(dessert_raw)
+saveRDS(dessert_raw,file='cleandessertdata.rds')
+
+```
+
+##Show libraries in Houston on map
+```{r}
+library(ggmap)
+centerofmap<-geocode('Houston')#get the coordinate of the center of the map
+mydata<-readRDS('cleandata.rds')
+mydata_repair<-readRDS('clean_repair.rds')
+mydata_good<-readRDS('clean_good.rds')
+myparkdata<-readRDS('cleanparkdata.rds')
+mydessertdata<- readRDS('cleandessertdata.rds')       
+#[link](http://spatioanalytics.com/)
+library(leaflet)
+href_bus<-"<b><a href='http://ridemetro.org/Pages/index.aspx'> ridemetro.org</a></b>"
+
+#href_good<- paste0("<a href=",mydata_good$link,"target='_blank'>",mydata_good$library,"</a>")
+href_good<- paste0("<a href=",mydata_good$link,"target='_blank'>","<strong>",mydata_good$library,"</strong>","</a>")
+
+content_good <- paste(sep = "<br/>",
+                      href_good,
+                      mydata_good$location,
+                      paste('Tel:',mydata_good$tel,sep=' '),
+                      paste('Office Hour:', mydata_good$hour,sep=' '),
+                      paste('Nearby Bus Routes:',mydata_good$bus,'(visit',href_bus,'for more info)',sep=' '))
+
+#href_repair<- paste0("<a href=",mydata_repair$link,"target='_blank'>",mydata_repair$library,"</a>")
+href_repair<- paste0("<a href=",mydata_repair$link,"target='_blank'>","<strong>",mydata_repair$library,"</strong>","</a>")
+
+content_repair<- paste(sep = "<br/>",
+                       href_repair,
+                       mydata_repair$location,
+                       paste('Tel:',mydata_repair$tel,sep=' '),
+                       paste('Office Hour:', 'Closed',sep=' '),
+                       paste('Nearby Bus Routes:',mydata_repair$bus,'(visit',href_bus,'for more info)',sep=' ')
+)
+
+href_park<- paste0("<a href=",myparkdata$link,"target='_blank'>","<strong>",myparkdata$park,"</strong>","</a>")
+content_park <- paste(sep = "<br/>",
+                      href_park,
+                      myparkdata$location)
+
+href_dessert<- paste0("<a href=",mydessertdata$link,"target='_blank'>","<strong>",mydessertdata$dessert,"</strong>","</a>")
+content_dessert <- paste(sep = "<br/>",
+                         href_dessert,
+                         mydessertdata$location)
+
+HPL_map <- leaflet()%>% setView(lng=centerofmap$lon,lat=centerofmap$lat,zoom=11) %>%
+        # Base groups
+        addTiles(group='OSM (default)') %>% 
+        addProviderTiles("Stamen.TonerLite", group = "Toner Lite") %>%
+        # Overlay groups
+        addCircleMarkers(data = mydata_good, lng = ~lon, lat = ~lat,popup=content_good,color='blue',fillOpacity=0.6,group = "Libraries in open")%>%
+        addCircleMarkers(data=mydata_repair,lng=~lon, lat=~lat,popup=content_repair,color='gray',fillOpacity = 0.5,group = "Libraries closed for repair") %>%
+        addCircleMarkers(data = myparkdata,lng = ~lon, lat = ~lat,popup=content_park,color='green',fillOpacity=sqrt(1/(as.numeric(myparkdata$rank)-2)),group = "Park") %>%
+        addCircleMarkers(data = mydessertdata,lng = ~lon, lat = ~lat,popup=content_dessert,color='red',fillOpacity=sqrt(1/as.numeric(mydessertdata$rank)),group = "Dessert Store") %>%
+        # Layers control
+        addLayersControl(
+               baseGroups = c("OSM (default)", "Toner Lite"),
+                overlayGroups = c("Libraries in open","Libraries closed for repair",'Park','Dessert Store'),
+                options = layersControlOptions(collapsed = FALSE)
+        )%>%addLegend('bottomright',colors=c('blue','gray','green','red'),labels=c('Libraries in open','Libraries closed for repair','Park (rank indicated by opacity)','Dessert Store (rank indicated by opacity)'),opacity=c(0.6,0.5,sqrt(1/(as.numeric(myparkdata$rank)-2)),sqrt(1/as.numeric(mydessertdata$rank)))) %>% 
+        hideGroup("Libraries closed for repair") %>% hideGroup('Park') %>% hideGroup('Dessert Store')
+HPL_map
+```
+
+#Export the map-widget
+```{r}
+library(htmlwidgets)
+saveWidget(widget=HPL_map,file='HPL_map.html',selfcontained=F)
+#useful [link](https://www.r-bloggers.com/interactive-mapping-with-leaflet-in-r/)
+#
+##export via shiny
+#library(shiny)
+#app <- shinyApp(
+#        ui <- fluidPage(leafletOutput('mymap')),
+#        server <- function(input, output) {
+#                map <-HPL_map
+#                output$mymap <- renderLeaflet(map)
+#        }
+#)
+#if (interactive()) print(app) #or runApp(app)
+```
+
